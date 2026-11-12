@@ -191,7 +191,7 @@ void apply_kernelsu_rules(void)
     }
     db = &pol->policydb;
 
-    policydb->latest_granting = old_pol->latest_granting + 1;
+    pol->latest_granting = old_pol->latest_granting + 1;
     if (!ksu_set_original_types(db, &old_pol->policydb, pol->latest_granting))
         pr_warn("failed to save original type metadata, use backup lookups\n");
 
