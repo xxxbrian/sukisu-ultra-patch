@@ -28,15 +28,6 @@ static const struct ksu_feature_handler su_compat_handler = {
     .set_handler = su_compat_feature_set,
 };
 
-static void __user *userspace_stack_buffer(const void *d, size_t len)
-{
-    // To avoid having to mmap a page in userspace, just write below the stack
-    // pointer.
-    char __user *p = (void __user *)current_user_stack_pointer() - len;
-
-    return copy_to_user(p, d, len) ? NULL : p;
-}
-
 static char __user *sh_user_path(void)
 {
     return userspace_stack_buffer(sh_path, sizeof(sh_path));
@@ -49,7 +40,6 @@ static char __user *ksud_user_path(void)
 
 
 #ifdef CONFIG_KSU_SUSFS
-extern const char __user *get_user_arg_ptr(struct user_arg_ptr argv, int nr);
 /*
  * return 0 -> No further checks should be required afterwards
  * return non-zero -> Further checks should be continued afterwards
@@ -111,51 +101,63 @@ int ksu_handle_execveat_init(struct filename *filename, struct user_arg_ptr *arg
 // the call from execve_handler_pre won't provided correct value for __never_use_argument, use them after fix execve_handler_pre, keeping them for consistence for manually patched code
 int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
                  void *argv_user, void *envp_user,
-                 int *__never_use_flags)
+                 int *flags)
 {
     struct filename *filename;
     struct ksu_sulog_pending_event *pending_sucompat = NULL;
     int ret;
 
     if (unlikely(!filename_ptr))
-        return 0;
+        return -EINVAL;
 
     filename = *filename_ptr;
     if (IS_ERR(filename))
-        return 0;
+        return -EINVAL;
 
     if (!ksu_handle_execveat_init(filename, (struct user_arg_ptr*)argv_user, (struct user_arg_ptr*)envp_user))
-        return 0;
+        return -EINVAL;
 
-    if (!(__ksu_is_allow_uid_for_current(current_uid().val)))
-        return 0;
+    if (likely(!__ksu_is_allow_uid_for_current(current_uid().val)))
+        return -EINVAL;
 
     if (likely(memcmp(filename->name, su_path, sizeof(su_path))))
-        return 0;
+        return -EINVAL;
 
     if (current_chrooted())
     {
         pr_err("ksu_handle_execveat_sucompat: su found but NOT allowed! Because current process is running in chrooted environment\n");
-        return 0;
+        return -EINVAL;
     }
 
-    pr_info("ksu_handle_execveat_sucompat: su found\n");
+    ret = escape_with_root_profile();
 
+    pr_info("ksu_handle_execveat_sucompat: su->ksud!\n");
     memcpy((void *)filename->name, ksud_path, sizeof(ksud_path));
 
     pending_sucompat = ksu_sulog_capture_sucompat(filename->name, (struct user_arg_ptr*)argv_user, GFP_KERNEL);
 
-    ret = escape_with_root_profile();
-    if (ret)
-        pr_err("escape_with_root_profile() failed: %d\n", ret);
-
     const char __user *argv_user_ptr = get_user_arg_ptr(*((struct user_arg_ptr*)argv_user), 0);
     if (!argv_user_ptr || IS_ERR(argv_user_ptr)) {
         pr_err("!argv_user_ptr || IS_ERR(argv_user_ptr)\n");
-        return 0;
+        return -EINVAL;
     }
 
     ksu_sulog_emit_pending(pending_sucompat, ret, GFP_KERNEL);
+
+    if (ret) {
+        pr_err("escape_with_root_profile() failed: %d\n", ret);
+        return -EINVAL;
+    }
+    return 0;
+}
+
+int ksu_handle_post_execveat_sucompat(int *fd, struct filename **filename_ptr,
+                 void *argv_user, void *envp_user,
+                 int *flags, int *retval)
+{
+    if (*retval >= 0) {
+        (void)ksu_install_su_fd();
+    }
     return 0;
 }
 
@@ -191,6 +193,7 @@ int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode,
         pr_err("ksu_handle_faccessat: su found but NOT allowed! Because current process is running in chrooted environment\n");
         return 0;
     }
+
     pr_info("ksu_handle_faccessat: su->sh!\n");
     memcpy((void *)((*filename)->name), sh_path, sizeof(sh_path));
     return 0;
@@ -208,6 +211,7 @@ int ksu_handle_stat(int *dfd, struct filename **filename, int *flags) {
         pr_err("ksu_handle_stat: su found but NOT allowed! Because current process is running in chrooted environment\n");
         return 0;
     }
+
     pr_info("ksu_handle_stat: su->sh!\n");
     memcpy((void *)((*filename)->name), sh_path, sizeof(sh_path));
     return 0;
